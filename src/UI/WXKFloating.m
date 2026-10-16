@@ -25,8 +25,11 @@
 @property (nonatomic, assign) BOOL observersRegistered;
 @property (nonatomic, assign) NSInteger retryCount;
 
++ (UIWindowScene *)activeWindowScene;
++ (UIWindow *)keyWindow;
 - (void)createWindow;
 - (void)layoutBall:(BOOL)normal;
+- (CGRect)screenBounds;
 - (void)ballTapped;
 - (void)handlePan:(UIPanGestureRecognizer *)pan;
 - (void)handleLongPress:(UILongPressGestureRecognizer *)press;
@@ -77,6 +80,15 @@
         [self createWindow];
         return;
     }
+    if (!self.window.windowScene) {
+        // 之前创建时场景不可用 → 拆掉重建，否则会一直"看不见也不重试"
+        WXKLog(@"[ui] 回到前台：窗口缺 windowScene，重建");
+        self.window.hidden = YES;
+        self.window = nil;
+        self.ball = nil;
+        [self createWindow];
+        return;
+    }
     self.window.hidden = NO;
     [self layoutBall:[WXKPrefs shared].boolFloating];
 }
@@ -99,34 +111,52 @@
     [[self shared] layoutBall:YES];
 }
 
+// 找一个可用的前台窗口场景。
+// 关键：iOS 13+ 的场景化 App 里，**没有 windowScene 的 UIWindow 根本不会显示**，
+// 所以拿不到场景时宁可重试，也不要创建一个永远看不见的窗口。
++ (UIWindowScene *)activeWindowScene {
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
+            continue;
+        }
+        if (scene.activationState == UISceneActivationStateForegroundActive ||
+            scene.activationState == UISceneActivationStateForegroundInactive) {
+            return (UIWindowScene *)scene;
+        }
+    }
+    UIWindow *key = [self keyWindow];
+    return key.windowScene;
+}
+
++ (UIWindow *)keyWindow {
+    UIWindow *key = nil;
+    for (UIWindow *w in UIApplication.sharedApplication.windows.reverseObjectEnumerator) {
+        if (w.isKeyWindow && !w.hidden) { key = w; break; }
+    }
+    return key ?: UIApplication.sharedApplication.windows.firstObject;
+}
+
 - (void)createWindow {
     CGFloat size = WXK_BALL_NORMAL;
-    UIWindow *keyWindow = nil;
-    for (UIWindow *w in UIApplication.sharedApplication.windows.reverseObjectEnumerator) {
-        if (w.isKeyWindow) { keyWindow = w; break; }
-    }
-    if (!keyWindow) keyWindow = UIApplication.sharedApplication.windows.firstObject;
-    if (!keyWindow) {
-        if (self.retryCount++ < 12) {
-            NSTimeInterval delay = MIN(0.5 * self.retryCount, 4.0);
-            WXKLog(@"[ui] 还没有窗口，%.1fs 后重试（第 %ld 次）", delay, (long)self.retryCount);
+
+    UIWindowScene *scene = [[self class] activeWindowScene];
+    if (!scene) {
+        if (self.retryCount++ < 20) {
+            NSTimeInterval delay = MIN(0.5 * self.retryCount, 3.0);
+            WXKLog(@"[ui] 还没有可用的 windowScene，%.1fs 后重试（第 %ld 次）", delay, (long)self.retryCount);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 [self createWindow];
             });
         } else {
-            WXKLog(@"[ui] 多次重试仍没有窗口；回到前台时会再试一次");
+            WXKLog(@"[ui] ⚠️ 一直拿不到 windowScene，悬浮球无法创建（回到前台会再试）");
         }
         return;
     }
     self.retryCount = 0;
 
     UIWindow *window = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, size, size)];
-    if (@available(iOS 13.0, *)) {
-        if (keyWindow.windowScene) {
-            window.windowScene = keyWindow.windowScene;
-        }
-    }
+    window.windowScene = scene;
     window.windowLevel = UIWindowLevelAlert + 1;
     window.backgroundColor = UIColor.clearColor;
     window.rootViewController = [[UIViewController alloc] init];
@@ -162,24 +192,47 @@
 
     // 不调用 makeKeyAndVisible：避免抢走微信的键盘/菜单焦点
     window.hidden = NO;
+    if (window.windowScene) {
+        WXKLog(@"[ui] 悬浮球窗口已创建（scene 正常）");
+    } else {
+        // 理论上进不来（上面已确保有 scene），真进来了就拆掉重试，避免"看不见也不重试"
+        WXKLog(@"[ui] ⚠️ 窗口没有 windowScene，拆掉重试");
+        self.window = nil;
+        [self createWindow];
+        return;
+    }
     [self layoutBall:[WXKPrefs shared].boolFloating];
+}
+
+// 屏幕尺寸：以 windowScene 的坐标空间为准（绝不用某个小窗口的 bounds 当屏幕）
+- (CGRect)screenBounds {
+    UIWindowScene *scene = self.window.windowScene ?: [[self class] activeWindowScene];
+    CGRect bounds = CGRectZero;
+    if (scene) {
+        bounds = scene.coordinateSpace.bounds;
+    }
+    if (bounds.size.width < 100 || bounds.size.height < 200) {
+        bounds = UIScreen.mainScreen.bounds;
+    }
+    return bounds;
 }
 
 - (void)layoutBall:(BOOL)normal {
     if (!self.window) return;
     CGFloat size = normal ? WXK_BALL_NORMAL : WXK_BALL_MINI;
-    UIWindow *host = self.window.windowScene.windows.firstObject ?: self.window;
-    CGRect screen = host.bounds;
-    if (screen.size.width < 1) {
-        screen = UIScreen.mainScreen.bounds;
-    }
+    CGRect screen = [self screenBounds];
     CGFloat x = [[WXKPrefs shared] doubleForKey:WXKKeyFloatingX];
     CGFloat y = [[WXKPrefs shared] doubleForKey:WXKKeyFloatingY];
     if (x < 0) {
         x = screen.size.width - size - 8;
     }
-    x = MIN(MAX(0, x), screen.size.width - size);
-    y = MIN(MAX(44, y), screen.size.height - size - 30);
+    CGFloat maxX = MAX(0, screen.size.width - size - 4);
+    CGFloat minY = 60;                                          // 避开状态栏
+    CGFloat maxY = MAX(minY, screen.size.height - size - 40);
+    x = MIN(MAX(0, x), maxX);
+    if (y < minY || y > maxY) {
+        y = MIN(MAX(minY, 160.0), maxY);                        // 越界就回默认位置，避免被摆到屏幕外
+    }
 
     self.window.frame = CGRectMake(x, y, size, size);
     self.ball.frame = self.window.bounds;
@@ -188,14 +241,12 @@
     self.ball.button.alpha = normal ? 1.0 : 0.7;
     self.ball.button.titleLabel.font = [UIFont systemFontOfSize:normal ? 15 : 10 weight:UIFontWeightSemibold];
     [self.ball.button setTitle:normal ? @"WX" : @"·" forState:UIControlStateNormal];
+    WXKLog(@"[ui] 悬浮球位置 x=%.0f y=%.0f（屏幕 %.0fx%.0f）",
+          x, y, screen.size.width, screen.size.height);
 }
 
 - (UIWindow *)hostWindow {
-    UIWindow *key = nil;
-    for (UIWindow *w in UIApplication.sharedApplication.windows.reverseObjectEnumerator) {
-        if (w.isKeyWindow) { key = w; break; }
-    }
-    return key ?: UIApplication.sharedApplication.windows.firstObject;
+    return [[self class] keyWindow];
 }
 
 - (void)ballTapped {
@@ -211,11 +262,13 @@
     }
     CGFloat x = self.panStart.x + translation.x;
     CGFloat y = self.panStart.y + translation.y;
-    UIWindow *host = [self hostWindow];
-    CGRect screen = host ? host.bounds : UIScreen.mainScreen.bounds;
+    CGRect screen = [self screenBounds];
     CGFloat size = self.window.frame.size.width;
-    x = MIN(MAX(0, x), screen.size.width - size);
-    y = MIN(MAX(44, y), screen.size.height - size - 30);
+    CGFloat maxX = MAX(0, screen.size.width - size - 4);
+    CGFloat minY = 60;
+    CGFloat maxY = MAX(minY, screen.size.height - size - 40);
+    x = MIN(MAX(0, x), maxX);
+    y = MIN(MAX(minY, y), maxY);
     self.window.frame = CGRectMake(x, y, size, size);
 
     if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {

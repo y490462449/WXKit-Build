@@ -10,6 +10,7 @@ NSString *const WXKKeyFloatingX          = @"floating.x";
 NSString *const WXKKeyFloatingY          = @"floating.y";
 NSString *const WXKKeyLogContent         = @"log.content";
 NSString *const WXKKeyVerboseLog         = @"log.verbose";
+NSString *const WXKKeyLoadedNotice       = @"ui.loadedNotice";
 
 NSString *const WXKKeyRecallEnabled      = @"recall.enabled";
 NSString *const WXKKeyRecallToast        = @"recall.toast";

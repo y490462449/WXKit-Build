@@ -60,6 +60,15 @@ jobs:
           set -o pipefail
           bash scripts/build-probe.sh 2>&1 | tee -a build-log.txt
 
+      # 有些注入流程（TrollFools 等）用 zip 导入，这里两种形式都给
+      - name: 打包 zip 形式（便于某些注入工具导入）
+        continue-on-error: true
+        run: |
+          cd build
+          zip -q WXKitProbe.zip WXKitProbe.dylib || true
+          zip -q WXKit.zip WXKit.dylib || true
+          ls -la
+
       - name: ad-hoc 签名副本 + 依赖检查
         continue-on-error: true
         run: |
@@ -81,6 +90,11 @@ jobs:
         run: |
           echo "== build/ =="
           ls -la build/ 2>/dev/null || echo "(build 目录不存在)"
+          if [ -f build/WXKitProbe.dylib ]; then
+            echo "✅ 探针产物存在（先注它验证链路）"
+          else
+            echo "::warning::探针没有产出，请检查上面的日志"
+          fi
           echo "== 编译日志尾部 =="
           tail -n 60 build-log.txt 2>/dev/null || echo "(没有日志)"
 
@@ -92,4 +106,5 @@ jobs:
           if-no-files-found: ignore
           path: |
             build/*.dylib
+            build/*.zip
             build-log.txt

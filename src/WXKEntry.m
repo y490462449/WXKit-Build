@@ -15,8 +15,50 @@
 #import "WXKAI.h"
 #import "WXKFloating.h"
 #import "WXKHook.h"
+#import "WXKSettings.h"
+#import "WXKDiagnostics.h"
 
 static NSInteger gHookRetry = 0;
+
+// 首次加载提示：只弹一次。它有两个作用——
+//   1) 明确告诉使用者"dylib 确实加载并执行了"（这是注入环节唯一的正向信号）；
+//   2) 万一悬浮球因为任何原因没显示，这里还能直接打开诊断报告，不至于无路可走。
+static void WXKShowLoadedNoticeOnce(void) {
+    WXKPrefs *prefs = [WXKPrefs shared];
+    if ([prefs boolForKey:WXKKeyLoadedNotice]) {
+        return;
+    }
+    [prefs setBool:YES forKey:WXKKeyLoadedNotice];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *key = nil;
+        for (UIWindow *w in UIApplication.sharedApplication.windows.reverseObjectEnumerator) {
+            if (w.isKeyWindow) { key = w; break; }
+        }
+        if (!key) key = UIApplication.sharedApplication.windows.firstObject;
+        UIViewController *top = key.rootViewController;
+        while (top.presentedViewController) {
+            top = top.presentedViewController;
+        }
+        if (!top) {
+            WXKLog(@"[ui] 首次提示：找不到可弹窗的控制器");
+            return;
+        }
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"WXKit 已加载"
+                             message:@"设置入口是屏幕边缘的「WX」悬浮球（可拖动，长按有菜单）。\n看不到悬浮球就点下面的诊断报告，把内容发回即可。"
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"诊断报告" style:UIAlertActionStyleDefault
+                                                handler:^(UIAlertAction *action) {
+            NSArray<NSString *> *lines = WXKLogSnapshot();
+            NSString *text = [NSString stringWithFormat:@"%@\n\n===== 最近日志 =====\n%@",
+                              [WXKBridge diagnosticReport],
+                              [lines componentsJoinedByString:@"\n"]];
+            [WXKSettings presentTextPageWithTitle:@"WXKit 诊断" text:text];
+        }]];
+        [top presentViewController:alert animated:YES completion:nil];
+    });
+}
 
 static void WXKTryInstallHooks(void) {
     if ([WXKBridge installMessageHooks]) {
@@ -43,6 +85,7 @@ static void WXKStartModules(void) {
 
     WXKTryInstallHooks();
     [WXKFloating install];
+    WXKShowLoadedNoticeOnce();          // 首次加载提示：证明"确实加载了" + 兜底入口
 }
 
 __attribute__((constructor)) static void WXKEntry(void) {

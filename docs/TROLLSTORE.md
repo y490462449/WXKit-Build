@@ -67,6 +67,9 @@ unzip -p WeChat.ipa 'Payload/*.app/Info.plist' > /tmp/wx.plist
 CI 产物里除了 `WXKit.dylib`，还有一个 **`WXKitProbe.dylib`**（约 40 行，不挂任何 hook、不改任何行为）。
 它的唯一作用是回答："dylib 到底能不能被注入进微信？"
 
+产物同时提供 **dylib 与 zip 两种形式**（`WXKitProbe.dylib` / `WXKitProbe.zip`）：
+有些注入流程用 zip 导入（例如按"App名_bundleid_哈希.zip"命名的注入包），两种都试一下，哪个能被识别就用哪个。
+
 先用它，能省掉一大轮瞎试：
 
 | 结果 | 说明 | 下一步 |
@@ -130,7 +133,11 @@ CI 产物里除了 `WXKit.dylib`，还有一个 **`WXKitProbe.dylib`**（约 40 
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | 注入后微信一打开就闪退 | 用了加密的 App Store 包，或重签名不完整 | 换解密 IPA 重装；注入时用 `WXKit-signed.dylib` |
-| 微信能开但没有任何变化 | TrollFools 注入没生效（列表里没有 WXKit） | 重新注入；确认注入的是微信而不是别的 App |
+| 微信能开但没有任何变化 | 先分清两件事：dylib 有没有被加载 | 见下面「看不到悬浮球」一行 |
+| **看不到悬浮球** | 完整版现在有**首次加载弹窗**（"WXKit 已加载"，只弹一次）：<br>• 弹窗出现 → dylib 确实加载了，问题只在悬浮球<br>• 弹窗也不出现 → dyld 没加载我们的 dylib | 弹窗里点「诊断报告」就能看到日志和探测报告，直接发出来即可 |
+| 悬浮球被摆到屏幕外（旧版 bug） | 旧版把某个小窗口的尺寸当成屏幕尺寸，算出的 y 是负数 | 已修：改用 `windowScene.coordinateSpace.bounds`，越界自动回默认位置 |
+| 窗口没有 `windowScene`（旧版静默失败） | iOS 13+ 场景化 App 里，无场景的 UIWindow 不会显示，且旧版不会重试 | 已修：拿不到场景就重试，回到前台还会自愈重建 |
+| 微信能开但没有任何变化（另一种） | TrollFools 注入没生效（列表里没有 WXKit） | 重新注入；确认注入的是微信而不是别的 App |
 | 悬浮球一直不出现 | 冷启动时还没有 keyWindow（插件已做退避重试 + 回前台自愈） | 切后台再回前台一次；仍不行则导出日志看 `[ui]` 记录 |
 | 收不到推送 / 通知异常 | 覆盖安装后 entitlements 与 App Store 版不一致 | 换能保留原始 entitlements 的 IPA；必要时回滚重装 App Store 版 |
 | 微信提示环境异常 / 弹出警告 | 微信自身检测到包被改动 | 本插件不做任何对抗检测；只能回滚到官方版 |

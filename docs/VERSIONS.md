@@ -12,6 +12,21 @@
 
 这两条规则现在都在 CI 的静态检查里，并且各自有一个变异测试用例（`tools/selftest_checker.py`）。
 
+### 注入成功但"完全没功能"（2026-10-16，真机反馈）
+
+用户注入 `WXKit.dylib` 后 TrollFools 显示成功、微信也能正常启动，但界面上什么都没有。查明是我自己的两个 bug：
+
+| # | 位置 | 问题 | 修复 |
+|---|---|---|---|
+| 1 | `WXKFloating.m` `layoutBall:` | 把 `windowScene.windows.firstObject`（可能是我们自己的 56×56 小窗口）当成屏幕尺寸，于是 `y = MIN(MAX(44,160), 56-56-30) = -30`，悬浮球被摆到**屏幕上方** | 改用 `windowScene.coordinateSpace.bounds`（并加兜底），越界自动回默认 y=160 |
+| 2 | `WXKFloating.m` `createWindow` | 拿不到 `windowScene` 时仍创建窗口 —— iOS 13+ 场景化 App 里这种窗口**不会显示**，而 `self.window` 非空导致重试逻辑停摆（静默失败） | 没有场景就不创建、退避重试；回到前台若发现场景缺失则拆掉重建 |
+
+另外给完整版加了**首次加载弹窗**（只弹一次，可用 `ui.loadedNotice` 关掉）：
+它同时是"dylib 确实加载了"的正向信号，并且弹窗里的「诊断报告」让用户在悬浮球失效时也能看到日志——
+避免"唯一入口坏了就没有任何办法"的死局。
+
+`tools/check_sources.py` 的变异自测从 9 项扩到 10 项，仍全部通过。
+
 ## 当前目标
 
 | 项 | 值 |

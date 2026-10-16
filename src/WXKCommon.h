@@ -31,6 +31,7 @@ extern NSString *const WXKKeyFloatingX;            // double 悬浮球位置
 extern NSString *const WXKKeyFloatingY;
 extern NSString *const WXKKeyLogContent;           // BOOL 日志是否记录消息正文（默认关，注意隐私）
 extern NSString *const WXKKeyVerboseLog;           // BOOL 详细日志
+extern NSString *const WXKKeyLoadedNotice;         // BOOL 首次加载提示是否已展示过（只弹一次）
 
 // 防撤回
 extern NSString *const WXKKeyRecallEnabled;        // BOOL
