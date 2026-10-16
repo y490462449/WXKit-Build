@@ -1,0 +1,11 @@
+Package: com.wxkit.tweak
+Name: WXKit 微信增强
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: 开源微信增强插件（自用）：防撤回、AI 自动回复、运行时诊断导出。
+ 纯 runtime 方法交换实现，不依赖任何越狱注入库；
+ 同一个 dylib 既能用 TrollStore+TrollFools 注入，也能以 rootless 方式安装到越狱设备。
+Maintainer: wxkit
+Author: wxkit
+Section: Tweaks
+Depends: firmware (>= 14.0)

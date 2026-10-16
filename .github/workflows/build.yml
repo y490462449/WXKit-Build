@@ -1,0 +1,116 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: 静态检查（不需要 macOS）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 检查括号配平、声明与实现是否对应、给自家类发的 selector 是否存在、
+      # C 函数是否有声明、中文字符串引号是否写错
+      - name: 源码静态检查
+        run: python tools/check_sources.py .
+
+  dylib:
+    name: 编译 dylib（TrollStore + TrollFools）
+    needs: lint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境信息
+        run: |
+          xcodebuild -version
+          echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+
+      - name: 编译
+        run: |
+          chmod +x scripts/build-dylib.sh scripts/build-probe.sh
+          ./scripts/build-dylib.sh
+          ./scripts/build-probe.sh
+
+      # 部分注入工具 / 场景下更省事：额外产出一份 ad-hoc 签名的副本。
+      # 没装上 ldid 也不会让流程失败，未签名的那份照样能用。
+      - name: 生成 ad-hoc 签名副本
+        run: |
+          brew install ldid || true
+          cp build/WXKit.dylib build/WXKit-signed.dylib
+          if command -v ldid >/dev/null 2>&1; then
+            ldid -S build/WXKit-signed.dylib && echo "已生成签名副本"
+          else
+            echo "环境里没有 ldid，保留未签名副本（TrollFools 自己会签名，通常不需要）"
+          fi
+          ls -l build/
+
+      # 只要链接了越狱专属库，TrollFools 注入后就会加载失败，直接让构建红掉
+      - name: 校验没有越狱专属依赖
+        run: |
+          DEPS=$(xcrun llvm-objdump --macho --dylibs-used build/WXKit.dylib)
+          echo "$DEPS"
+          if echo "$DEPS" | grep -Eiq 'substrate|ellekit|libhooker|libsubstitute'; then
+            echo "::error::dylib 链接了越狱专属库，TrollFools 注入后会加载失败"
+            exit 1
+          fi
+          echo "OK：只依赖系统库"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WXKit-dylib
+          path: |
+            build/WXKit.dylib
+            build/WXKit-signed.dylib
+            build/WXKitProbe.dylib
+
+  deb:
+    name: 编译 rootless .deb（Dopamine 越狱）
+    needs: lint
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Theos 与 iPhoneOS SDK
+        run: |
+          brew install ldid xz
+          export THEOS="$HOME/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+
+          # 只取一个 SDK（theos/sdks 整仓库很大，用稀疏检出），并自动挑选最新的 iPhoneOS SDK
+          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout init --cone
+          SDK=$(git ls-tree --name-only HEAD | grep -E '^iPhoneOS[0-9]+\.[0-9]+\.sdk$' | sort -V | tail -1)
+          echo "使用 SDK: $SDK"
+          test -n "$SDK"
+          git sparse-checkout set "$SDK"
+          git checkout
+
+          mkdir -p "$THEOS/sdks"
+          mv "/tmp/sdks/$SDK" "$THEOS/sdks/"
+          ls "$THEOS/sdks"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+      - name: 打包
+        run: make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: 检查 deb 里确实带上了 dylib 与过滤器
+        run: |
+          ls -la packages/
+          DEB=$(ls packages/*.deb | head -1)
+          rm -rf /tmp/debcheck && mkdir -p /tmp/debcheck && cd /tmp/debcheck
+          ar x "$DEB" || true
+          ls -la
+          tar -tvf data.tar.* 2>/dev/null | grep -i 'WXKit' || echo "（本机 tar 不支持该压缩格式，跳过内容核对）"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WXKit-deb
+          path: packages/*.deb

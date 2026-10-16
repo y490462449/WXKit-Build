@@ -1,0 +1,9 @@
+build/
+.theos/
+packages/
+*.dylib
+*.deb
+*.o
+__pycache__/
+*.pyc
+.DS_Store
