@@ -6,4 +6,5 @@ packages/
 *.o
 __pycache__/
 *.pyc
+.checker-mutations/
 .DS_Store

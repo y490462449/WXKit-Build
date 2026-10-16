@@ -176,11 +176,15 @@ docs/VERSIONS.md            版本适配记录（目标：微信 8.0.76 / iOS 15
 tools/analyze_dump.py       诊断文件分析（按用途分类列出候选方法+签名）
 tools/wechat_ipa_to_overrides.py
                             从解密版微信 IPA / 裸 Mach-O 直接生成「候选名覆盖」文本
-tools/check_sources.py      静态检查：括号/声明实现/selector/C 函数/引号
-scripts/build-dylib.sh      纯 clang 编译 dylib
+tools/check_sources.py      静态检查：括号/@end/声明实现/selector/C 函数参数/引号
+tools/selftest_checker.py   变异自测：故意注入 6 类错误，验证检查器真的能报出来
+tools/selftest_build_scripts.sh
+                            构建脚本自测：用假 xcrun 验证成功/失败路径（不需要 macOS）
+scripts/build-dylib.sh      纯 clang 编译 dylib（带阶段标记，失败会打印 BUILD FAILED at stage=…）
 scripts/build-probe.sh      编译最小注入探针（只验证链路，不挂 hook）
 probe/WXKProbe.m            探针源码
-.github/workflows/build.yml CI：lint（静态检查）→ dylib + deb
+.github/workflows/build.yml CI：lint（静态检查 + 两个自测）→ 编译 dylib
+.github/workflows/deb.yml   CI：手动触发，打 rootless .deb（越狱才用）
 ```
 
 ### 想自己加 hook 的话
@@ -201,8 +205,9 @@ probe/WXKProbe.m            探针源码
 | 给自家类发的 selector 是否存在 | 同上（扫到 154 处跨类消息） | ✅ 0 问题 |
 | C 函数是否都有声明 | 同上 | ✅ 0 问题 |
 | 中文字符串引号写错（编译期错误） | 同上（新增检查项） | ✅ 0 问题 |
-| **检查器本身是否有效** | 故意注入 4 类错误（selector 拼错 / 多传参数 / 未声明函数 / 引号写错）后必须报错 | ✅ 全部被抓出 |
-| 未链接越狱专属库 | 源码 grep + CI 里 `llvm-objdump --dylibs-used` 校验 | ✅ 源码无引用；CI 校验待跑 |
+| **检查器本身是否有效** | `tools/selftest_checker.py`：故意注入 6 类错误（参数少传 / 丢 @end / 重复方法 / 引号写错 / 未声明 selector / 声明未实现）后必须报错 | ✅ 6/6 全部被抓出 |
+| **构建脚本本身是否可靠** | `tools/selftest_build_scripts.sh`：用假 xcrun 跑成功与失败路径 | ✅ 成功路径 exit 0 且含 BUILD OK；失败路径 exit 1 且打印 `BUILD FAILED at stage=2/5 编译 line=41` |
+| 未链接越狱专属库 | 源码 grep + CI 里 `otool -L` 校验 | ✅ 源码无引用；CI 校验待跑 |
 | YAML 工作流基本结构 | 制表符/缩进/行尾空格检查 | ✅ 无问题 |
 | CI 调用静态检查的方式 | 以 `cwd=项目根 python tools/check_sources.py .` 实跑 | ✅ 通过 |
 | **真实编译（clang / Theos）** | GitHub Actions | ⏳ 需你推仓库后跑 |

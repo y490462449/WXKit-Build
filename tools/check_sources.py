@@ -109,10 +109,9 @@ def balance_issues(path, code):
     return issues
 
 
-def collect_methods(text, code):
-    """返回 {selector: arity}，来自 @interface / @implementation 中的方法声明与实现。"""
-    methods = {}
-    # 以 +/- 开头，累积到 ; 或 { 为止
+def collect_method_list(code):
+    """按出现顺序返回 [(selector, arity)]，重复定义要能被看见（dict 会吃掉重复项）。"""
+    methods = []
     lines = code.split("\n")
     buffer = ""
     collecting = False
@@ -129,10 +128,15 @@ def collect_methods(text, code):
         if ";" in buffer or "{" in buffer:
             selector, arity = selector_from_declaration(buffer)
             if selector:
-                methods.setdefault(selector, arity)
+                methods.append((selector, arity))
             collecting = False
             buffer = ""
     return methods
+
+
+def collect_methods(text, code):
+    """返回 {selector: arity}，来自 @interface / @implementation 中的方法声明与实现。"""
+    return dict(collect_method_list(code))
 
 
 def strip_parens(part):
@@ -265,6 +269,105 @@ def selector_from_expression(inner):
     return None, 0
 
 
+def block_end_issues(path, code):
+    """@interface / @implementation 的个数必须与 @end 相同（缺 @end 是硬错误）。"""
+    opens = len(re.findall(r"@(?:interface|implementation)\b", code))
+    ends = len(re.findall(r"@end\b", code))
+    if opens != ends:
+        return [f"{path.name}: @interface/@implementation {opens} 个但 @end {ends} 个（缺或多 @end）"]
+    return []
+
+
+def duplicate_method_issues(path, code):
+    """同一个 @implementation 里重复定义同一个 selector 是硬错误。"""
+    issues = []
+    for match in re.finditer(r"@implementation\s+(WXK\w+)", code):
+        name = match.group(1)
+        end = code.find("@end", match.end())
+        if end == -1:
+            continue
+        block = code[match.end():end]
+        seen = set()
+        for sel, _arity in collect_method_list(block):
+            if sel in seen:
+                issues.append(f"{path.name}: @implementation {name} 里重复定义了 {sel}")
+            seen.add(sel)
+    return issues
+
+
+def parse_c_function_arity(text):
+    """解析 C 函数参数个数：名字 -> (arity, is_variadic)。
+
+    关键点：必须只在"声明/定义"上下文里取签名（行首、带返回类型），
+    否则 `WXKLog(@"...")` 这种调用会被误当成声明 —— 字符串在预处理阶段已被剥离，
+    调用看起来和声明一模一样。
+    """
+    result = {}
+    type_prefix = (r"(?:static\s+)?(?:void|id|BOOL|instancetype|Class|SEL|IMP|NSInteger|NSUInteger|"
+                   r"CGFloat|NSTimeInterval|NSString|NSArray|NSDictionary|NSMutableArray|"
+                   r"NSMutableDictionary|NSMutableString|WXK\w+)")
+    pattern = re.compile(
+        type_prefix + r"[\w\s\*<>]*?\b(WXK[A-Z]\w+)\s*\(([^;{)]*)\)\s*"
+        r"(?:NS_FORMAT_FUNCTION\([^)]*\))?\s*[;{]")
+    for match in pattern.finditer(text):
+        name, params = match.group(1), match.group(2).strip()
+        if not params or params == "void":
+            result[name] = (0, False)
+            continue
+        variadic = "..." in params
+        clean = params.replace("...", "").strip()
+        commas = clean.count(",")
+        arity = commas + 1 if clean else 0
+        if variadic:
+            arity = max(0, arity - 1)
+        result[name] = (arity, variadic)
+    return result
+
+
+def count_call_args(code, open_index):
+    """从 '(' 位置开始数顶层逗号，返回 (参数个数, 结束位置)；空参数算 0 个。"""
+    depth = 0
+    i = open_index
+    n = len(code)
+    commas = 0
+    has_content = False
+    while i < n:
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return (0 if not has_content else commas + 1), i
+        elif ch == "," and depth == 1:
+            commas += 1
+        elif depth == 1 and not ch.isspace() and ch not in "([{":
+            has_content = True
+        i += 1
+    return -1, n
+
+
+def c_call_arity_issues(path, code, arity_table, definition_offsets):
+    issues = []
+    for match in re.finditer(r"\b(WXK[A-Z]\w+)\s*\(", code):
+        name = match.group(1)
+        if name not in arity_table:
+            continue
+        if match.start() in definition_offsets.get(name, ()):
+            continue
+        open_index = code.index("(", match.start())
+        args, _ = count_call_args(code, open_index)
+        if args < 0:
+            continue   # 括号不配平，交给 balance 检查
+        arity, variadic = arity_table[name]
+        if variadic:
+            if args < arity:
+                issues.append(f"{path.name}: {name} 至少需要 {arity} 个参数，这里只传了 {args} 个")
+        elif args != arity:
+            issues.append(f"{path.name}: {name} 需要 {arity} 个参数，这里传了 {args} 个")
+    return issues
+
+
 def resolve_root(argument):
     """允许在仓库根目录或 WXKit 目录下运行：找不到 src 时自动向下找一层。"""
     root = pathlib.Path(argument)
@@ -310,13 +413,16 @@ def main():
         codes[path] = code
         issues += balance_issues(path, code)
         issues += cjk_outside_string_issues(path, code)
+        issues += block_end_issues(path, code)
+        issues += duplicate_method_issues(path, code)
         for match in re.finditer(r'#import\s+"([^"]+)"', raw):
             if match.group(1) not in header_names:
                 issues.append(f"{path.name}: 找不到头文件 {match.group(1)}")
 
     declared = {}
     implemented = {}
-    for path in headers:
+    # 声明也要看 .m：私有方法通常写成 @interface X () … @end，只查头文件会漏掉它们
+    for path in headers + sources:
         for name, methods in find_interfaces(texts[path]).items():
             declared.setdefault(name, {}).update(methods)
     for path in sources:
@@ -326,7 +432,7 @@ def main():
     for name, methods in declared.items():
         for selector in methods:
             if selector not in implemented.get(name, {}):
-                issues.append(f"{name}: 头文件声明了 {selector} 但没有实现")
+                issues.append(f"{name}: 声明了 {selector} 但没有实现")
 
     own_classes = set(declared) | set(implemented)
     declared_c_functions = set()
@@ -338,9 +444,18 @@ def main():
         defined_c_functions |= set(
             re.findall(r"\b(WXK[A-Z]\w+)\s*\([^)\n]*\)\s*\{", texts[path]))
 
+    # C 函数参数个数：自家函数调用传错参数个数是硬错误
+    arity_table = {}
+    for path in headers + sources:
+        arity_table.update(parse_c_function_arity(codes[path]))
+
     scanned_messages = 0
     for path in sources:
         code = codes[path]
+        definition_offsets = {}
+        for match in re.finditer(r"\b(WXK[A-Z]\w+)\s*\([^)\n]*\)\s*\{", code):
+            definition_offsets.setdefault(match.group(1), set()).add(match.start())
+        issues += c_call_arity_issues(path, code, arity_table, definition_offsets)
         for receiver, selector, arity, offset in scan_message_sends(code, own_classes):
             if receiver in ("self", "super"):
                 continue

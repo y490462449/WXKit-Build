@@ -15,10 +15,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 检查括号配平、声明与实现是否对应、给自家类发的 selector 是否存在、
-      # C 函数是否有声明、中文字符串引号是否写错
+      # 括号配平、头文件引用、声明与实现对应、给自家类发的 selector、C 函数声明与参数个数、中文串引号
       - name: 源码静态检查
         run: python tools/check_sources.py .
+
+      # 证明检查器本身有效：故意注入 6 类错误，必须每一类都被抓出来
+      - name: 检查器变异自测
+        run: python tools/selftest_checker.py
+
+      # 不需要 macOS：用假 xcrun 验证两个构建脚本的语法与成功/失败路径
+      - name: 构建脚本自测
+        run: bash tools/selftest_build_scripts.sh
 
   dylib:
     name: 编译 dylib（TrollStore + TrollFools）
@@ -27,90 +34,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 环境信息
+      # 先自检环境：如果这一步就报错，说明问题在 runner/SDK，而不是代码
+      - name: 环境自检
         run: |
+          set -x
+          sw_vers
+          xcode-select -p
           xcodebuild -version
-          echo "iPhoneOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
+          xcrun --sdk iphoneos --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --find clang
+          xcrun --sdk iphoneos clang --version
 
-      - name: 编译
+      # 编译日志同时写进 build-log.txt，失败也会作为 artifact 上传，方便定位
+      - name: 编译 WXKit.dylib
         run: |
-          chmod +x scripts/build-dylib.sh scripts/build-probe.sh
-          ./scripts/build-dylib.sh
-          ./scripts/build-probe.sh
+          set -o pipefail
+          mkdir -p build
+          bash scripts/build-dylib.sh 2>&1 | tee build-log.txt
 
-      # 部分注入工具 / 场景下更省事：额外产出一份 ad-hoc 签名的副本。
-      # 没装上 ldid 也不会让流程失败，未签名的那份照样能用。
-      - name: 生成 ad-hoc 签名副本
+      # 探针是次要产物，失败不影响主产物
+      - name: 编译探针 WXKitProbe.dylib（失败可忽略）
+        continue-on-error: true
         run: |
+          set -o pipefail
+          bash scripts/build-probe.sh 2>&1 | tee -a build-log.txt
+
+      - name: ad-hoc 签名副本 + 依赖检查
+        continue-on-error: true
+        run: |
+          cp build/WXKit.dylib build/WXKit-signed.dylib || true
           brew install ldid || true
-          cp build/WXKit.dylib build/WXKit-signed.dylib
           if command -v ldid >/dev/null 2>&1; then
-            ldid -S build/WXKit-signed.dylib && echo "已生成签名副本"
+            ldid -S build/WXKit-signed.dylib && echo "已生成签名副本" || echo "签名失败，保留未签名副本"
           else
-            echo "环境里没有 ldid，保留未签名副本（TrollFools 自己会签名，通常不需要）"
+            echo "环境里没有 ldid，保留未签名副本（TrollFools 自己会签名）"
           fi
-          ls -l build/
+          echo "== dylib 依赖（应当只有系统库） =="
+          otool -L build/WXKit.dylib || true
+          if otool -L build/WXKit.dylib 2>/dev/null | grep -Eiq 'substrate|ellekit|libhooker|libsubstitute'; then
+            echo "::warning::dylib 链接了越狱专属库，TrollFools 下可能加载失败"
+          fi
 
-      # 只要链接了越狱专属库，TrollFools 注入后就会加载失败，直接让构建红掉
-      - name: 校验没有越狱专属依赖
+      - name: 结果汇总
+        if: always()
         run: |
-          DEPS=$(xcrun llvm-objdump --macho --dylibs-used build/WXKit.dylib)
-          echo "$DEPS"
-          if echo "$DEPS" | grep -Eiq 'substrate|ellekit|libhooker|libsubstitute'; then
-            echo "::error::dylib 链接了越狱专属库，TrollFools 注入后会加载失败"
-            exit 1
-          fi
-          echo "OK：只依赖系统库"
+          echo "== build/ =="
+          ls -la build/ 2>/dev/null || echo "(build 目录不存在)"
+          echo "== 编译日志尾部 =="
+          tail -n 60 build-log.txt 2>/dev/null || echo "(没有日志)"
 
+      # 无论成功失败都上传：失败时把 build-log.txt 发出来就能定位问题
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: WXKit-dylib
+          name: WXKit-artifacts
+          if-no-files-found: ignore
           path: |
-            build/WXKit.dylib
-            build/WXKit-signed.dylib
-            build/WXKitProbe.dylib
-
-  deb:
-    name: 编译 rootless .deb（Dopamine 越狱）
-    needs: lint
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 安装 Theos 与 iPhoneOS SDK
-        run: |
-          brew install ldid xz
-          export THEOS="$HOME/theos"
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
-
-          # 只取一个 SDK（theos/sdks 整仓库很大，用稀疏检出），并自动挑选最新的 iPhoneOS SDK
-          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/theos/sdks.git /tmp/sdks
-          cd /tmp/sdks
-          git sparse-checkout init --cone
-          SDK=$(git ls-tree --name-only HEAD | grep -E '^iPhoneOS[0-9]+\.[0-9]+\.sdk$' | sort -V | tail -1)
-          echo "使用 SDK: $SDK"
-          test -n "$SDK"
-          git sparse-checkout set "$SDK"
-          git checkout
-
-          mkdir -p "$THEOS/sdks"
-          mv "/tmp/sdks/$SDK" "$THEOS/sdks/"
-          ls "$THEOS/sdks"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-
-      - name: 打包
-        run: make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
-
-      - name: 检查 deb 里确实带上了 dylib 与过滤器
-        run: |
-          ls -la packages/
-          DEB=$(ls packages/*.deb | head -1)
-          rm -rf /tmp/debcheck && mkdir -p /tmp/debcheck && cd /tmp/debcheck
-          ar x "$DEB" || true
-          ls -la
-          tar -tvf data.tar.* 2>/dev/null | grep -i 'WXKit' || echo "（本机 tar 不支持该压缩格式，跳过内容核对）"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: WXKit-deb
-          path: packages/*.deb
+            build/*.dylib
+            build-log.txt

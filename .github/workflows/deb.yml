@@ -1,0 +1,56 @@
+name: build-deb
+
+# 只有越狱（Dopamine rootless）路线才需要 .deb，所以改成手动触发，避免每次 push 都跑。
+# 用法：仓库 → Actions → build-deb → Run workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deb:
+    name: 编译 rootless .deb（Dopamine 越狱）
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Theos 与 iPhoneOS SDK
+        run: |
+          brew install ldid xz
+          export THEOS="$HOME/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+
+          # 只取一个 SDK（theos/sdks 整仓库很大，用稀疏检出），自动挑选最新的 iPhoneOS SDK
+          git clone --depth 1 --filter=blob:none --no-checkout https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout init --cone
+          SDK=$(git ls-tree --name-only HEAD | grep -E '^iPhoneOS[0-9]+\.[0-9]+\.sdk$' | sort -V | tail -1)
+          echo "使用 SDK: $SDK"
+          test -n "$SDK"
+          git sparse-checkout set "$SDK"
+          git checkout
+
+          mkdir -p "$THEOS/sdks"
+          mv "/tmp/sdks/$SDK" "$THEOS/sdks/"
+          ls "$THEOS/sdks"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+
+      - name: 打包
+        run: make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+
+      - name: 检查 deb 内容
+        run: |
+          ls -la packages/ || true
+          DEB=$(ls packages/*.deb 2>/dev/null | head -1)
+          if [ -n "$DEB" ]; then
+            rm -rf /tmp/debcheck && mkdir -p /tmp/debcheck && cd /tmp/debcheck
+            ar x "$DEB" || true
+            ls -la
+            tar -tvf data.tar.* 2>/dev/null | grep -i 'WXKit' || echo "（本机 tar 不支持该压缩格式，跳过内容核对）"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: WXKit-deb
+          if-no-files-found: ignore
+          path: packages/*.deb
