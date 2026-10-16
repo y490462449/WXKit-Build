@@ -3,6 +3,15 @@
 每个微信版本都需要一次真机适配：确认自检全 ✅、消息管线真的通。
 这里记录适配过的版本，方便下次遇到新版本时对照。
 
+## 编译问题记录（与微信版本无关，但值得留档）
+
+| 时间 | 环境 | 问题 | 处理 |
+|---|---|---|---|
+| 2026-10-16 | Xcode 15.4 / iPhoneOS 17.5 SDK | `WXKMsgStore.m:125` `[WXKPrefs shared].integerForKey:KEY` —— 给**带参数的方法**用了点语法，硬编译错误 | 改成 `[[WXKPrefs shared] integerForKey:KEY]`；并给 `tools/check_sources.py` 加了"非法点语法"规则 |
+| 2026-10-16 | 同上 | `WXKLog.m:47` 把 `NSString *` 传给要 `NSData *` 的 `writeData:`（warning，但实际会写坏日志文件） | 先 `dataUsingEncoding:` 再写；并加了 `writeData:` 参数类型规则 |
+
+这两条规则现在都在 CI 的静态检查里，并且各自有一个变异测试用例（`tools/selftest_checker.py`）。
+
 ## 当前目标
 
 | 项 | 值 |

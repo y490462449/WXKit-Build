@@ -35,6 +35,129 @@ SIMPLE_SELECTOR = re.compile(r"^[A-Za-z_]\w*$")
 # 去注释去字符串后还有中文，基本就是引号写错导致字符串提前结束。
 CJK = re.compile(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]")
 
+# 点语法只能用于属性；`[obj foo].bar:baz` 这种"给带参数的方法用点语法"是硬错误。
+# 真机上就是这么挂的： [WXKPrefs shared].integerForKey:KEY
+DOT_ARG = re.compile(r"\]\s*\.\s*[A-Za-z_]\w*\s*:")
+
+# 已知的"参数类型容易写错"的 API：writeData: 要 NSData，
+# 传字符串字面量 / stringWithFormat: / stringByAppendingString: 的结果都是 bug。
+WRITE_DATA = re.compile(r"writeData:\s*(?:\[?@\"|[^\]]*stringWithFormat:|[^\]]*stringByAppendingString:)")
+
+
+PROPERTY_DECL = re.compile(r"@property\s*\([^)]*\)\s*([^;]*);")
+BLOCK_PROPERTY = re.compile(r"\(\s*\^\s*([A-Za-z_]\w*)\s*\)")
+# 只检查"返回自身类型"的单例访问器：`[WXKPrefs shared].xxx`。
+# 不能用任意访问器 —— `[WXKBridge selfDisplayName].length` 的点语法作用在返回的字符串上，那样会误报。
+SINGLETON_ACCESSORS = (r"(?:shared|defaultCenter|sharedInstance|sharedCenter|"
+                       r"sharedServiceCenter|sharedManager|defaultInstance)")
+SINGLETON_DOT = re.compile(r"\[\s*(WXK\w+)\s+(" + SINGLETON_ACCESSORS + r")\s*\]\s*\.\s*([A-Za-z_]\w*)")
+NSOBJECT_DOT = {"description", "debugDescription", "hash", "class", "superclass", "self", "isProxy"}
+
+
+def collect_properties(text):
+    """从 @interface 块里收集 @property 名字（按类分组）。
+
+    要处理两种写法：
+        @property (nonatomic, copy) NSString *pageTitle;
+        @property (nonatomic, copy) void (^action)(void);   ← block 属性，不能按"最后一个标识符"取
+    """
+    result = {}
+    for match in re.finditer(r"@interface\s+(WXK\w+)", text):
+        name = match.group(1)
+        end = text.find("@end", match.end())
+        if end == -1:
+            continue
+        block = text[match.end():end]
+        names = set()
+        for decl_match in PROPERTY_DECL.finditer(block):
+            decl = decl_match.group(1)
+            block_prop = BLOCK_PROPERTY.search(decl)
+            if block_prop:
+                names.add(block_prop.group(1))
+                continue
+            cleaned = re.sub(r"<[^>]*>", "", decl)      # 去掉泛型参数
+            identifiers = re.findall(r"[A-Za-z_]\w*", cleaned)
+            if identifiers:
+                names.add(identifiers[-1])
+        result.setdefault(name, set()).update(names)
+    return result
+
+
+def find_properties(text):
+    return collect_properties(text)
+
+
+def singleton_dot_issues(path, code, declared, properties_by_class):
+    """`[WXKPrefs shared].xxx` —— xxx 必须是该类声明的属性或无参方法，否则编译不过。"""
+    issues = []
+    for match in SINGLETON_DOT.finditer(code):
+        cls, _accessor, name = match.group(1), match.group(2), match.group(3)
+        known = set(properties_by_class.get(cls, set()))
+        known |= {sel for sel, arity in declared.get(cls, {}).items() if arity == 0 and ":" not in sel}
+        known |= NSOBJECT_DOT
+        if not known:
+            continue          # 这个类没有收集到声明信息，跳过（避免误报）
+        if name not in known:
+            line = code[:match.start()].count("\n") + 1
+            snippet = code.split("\n")[line - 1].strip()[:70]
+            issues.append(f"{path.name}:{line} {cls} 上没有名为 {name} 的属性/无参方法: {snippet}")
+    return issues
+
+
+def typed_dot_variable_issues(path, code, declared, properties_by_class, superclasses):
+    """`WXKPrefs *p = ...; p.foo` —— foo 不存在于该类声明的属性/无参方法时编译不过。
+
+    只检查 NSObject 直接子类的变量：UI 子类会继承大量 UIKit 属性，容易误报。
+    真机编译已认可的 WXKBridge/WXKHook/WXKLog/WXKMsgStore 四个文件必须零误报。
+    """
+    issues = []
+    # 局部/成员声明： WXKXxx *name = ...  也包括 for (WXKXxx *name in ...) 与参数列表
+    var_types = {}
+    for match in re.finditer(r"\b(WXK[A-Z]\w*)\s*\*+\s*([A-Za-z_]\w*)\s*(?:[=;),]|\bin\b)", code):
+        cls, var = match.group(1), match.group(2)
+        if superclasses.get(cls) == "NSObject":
+            var_types.setdefault(var, set()).add(cls)
+    if not var_types:
+        return issues
+    for var, classes in var_types.items():
+        # 同名变量在同一个文件里出现在不同作用域/不同类型 → 无法安全判断，跳过（避免误报）
+        if len(classes) != 1:
+            continue
+        cls = next(iter(classes))
+        known = set(properties_by_class.get(cls, set()))
+        known |= {sel for sel, arity in declared.get(cls, {}).items() if arity == 0 and ":" not in sel}
+        known |= NSOBJECT_DOT
+        if not known:
+            continue
+        for match in re.finditer(r"\b" + re.escape(var) + r"\s*\.\s*([A-Za-z_]\w*)", code):
+            name = match.group(1)
+            if name in known:
+                continue
+            line = code[:match.start()].count("\n") + 1
+            snippet = code.split("\n")[line - 1].strip()[:70]
+            issues.append(f"{path.name}:{line} {cls} 变量 {var} 上用点语法访问了不存在的 {name}: {snippet}")
+    return issues
+
+
+def dot_arg_issues(path, code):
+    """点语法后跟冒号 = 把带参数的方法当属性用，编译不过。"""
+    issues = []
+    for match in DOT_ARG.finditer(code):
+        line = code[:match.start()].count("\n") + 1
+        snippet = code.split("\n")[line - 1].strip()[:70]
+        issues.append(f"{path.name}:{line} 非法点语法（带参数的方法不能用点语法）: {snippet}")
+    return issues
+
+
+def write_data_issues(path, code):
+    """writeData: 收到字符串而不是 NSData。"""
+    issues = []
+    for match in WRITE_DATA.finditer(code):
+        line = code[:match.start()].count("\n") + 1
+        snippet = code.split("\n")[line - 1].strip()[:70]
+        issues.append(f"{path.name}:{line} writeData: 的参数看起来是 NSString，应为 NSData: {snippet}")
+    return issues
+
 
 def cjk_outside_string_issues(path, code):
     issues = []
@@ -415,6 +538,8 @@ def main():
         issues += cjk_outside_string_issues(path, code)
         issues += block_end_issues(path, code)
         issues += duplicate_method_issues(path, code)
+        issues += dot_arg_issues(path, code)
+        issues += write_data_issues(path, code)
         for match in re.finditer(r'#import\s+"([^"]+)"', raw):
             if match.group(1) not in header_names:
                 issues.append(f"{path.name}: 找不到头文件 {match.group(1)}")
@@ -449,6 +574,18 @@ def main():
     for path in headers + sources:
         arity_table.update(parse_c_function_arity(codes[path]))
 
+    # [WXKXxx shared].prop 的合法性检查需要"每个类声明了哪些属性/无参方法"
+    properties_by_class = {}
+    for path in headers + sources:
+        for name, props in find_properties(codes[path]).items():
+            properties_by_class.setdefault(name, set()).update(props)
+
+    # 类 → 直接父类（用于判断是否可以安全地做"点语法属性存在性"检查）
+    superclasses = {}
+    for path in headers + sources:
+        for match in re.finditer(r"@interface\s+(WXK\w+)\s*:\s*(\w+)", codes[path]):
+            superclasses[match.group(1)] = match.group(2)
+
     scanned_messages = 0
     for path in sources:
         code = codes[path]
@@ -456,6 +593,8 @@ def main():
         for match in re.finditer(r"\b(WXK[A-Z]\w+)\s*\([^)\n]*\)\s*\{", code):
             definition_offsets.setdefault(match.group(1), set()).add(match.start())
         issues += c_call_arity_issues(path, code, arity_table, definition_offsets)
+        issues += singleton_dot_issues(path, code, declared, properties_by_class)
+        issues += typed_dot_variable_issues(path, code, declared, properties_by_class, superclasses)
         for receiver, selector, arity, offset in scan_message_sends(code, own_classes):
             if receiver in ("self", "super"):
                 continue

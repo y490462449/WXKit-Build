@@ -43,6 +43,23 @@ MUTATIONS = [
      "src/UI/WXKSettings.m",
      "- (void)close {\n    [self dismissViewControllerAnimated:YES completion:nil];\n}\n\n- (void)share {",
      "- (void)share {"),
+    # 以下两条来自真机 CI 的真实报错（2026-10-16，微信目标版本 8.0.76 的那次构建）
+    ("点语法用于带参数的方法（真机编译错误）",
+     "src/Core/WXKMsgStore.m",
+     "[[WXKPrefs shared] integerForKey:WXKKeyRecallKeep]",
+     "[WXKPrefs shared].integerForKey:WXKKeyRecallKeep"),
+    ("writeData: 传了 NSString（真机警告 + 真 bug）",
+     "src/Core/WXKLog.m",
+     "[fh writeData:payload];",
+     '[fh writeData:[(line ?: @"") stringByAppendingString:@"\\n"]];'),
+    ("单例属性名写错（[X shared].不存在的东西）",
+     "src/Core/WXKLog.m",
+     "[WXKPrefs shared].boolVerbose",
+     "[WXKPrefs shared].boolVerboseXX"),
+    ("带类型变量用点语法访问不存在的属性",
+     "src/UI/WXKSettings.m",
+     "version.detail = WXK_VERSION;",
+     "version.details = WXK_VERSION;"),
 ]
 
 

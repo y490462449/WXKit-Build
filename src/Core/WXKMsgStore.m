@@ -122,7 +122,7 @@ static NSString *WXKRecallPath(void) {
     dict[@"sender"] = who ?: original.sender ?: @"";
     dict[@"content"] = original.content ?: @"";
     dict[@"originalTime"] = @(original.time);
-    NSInteger keep = MAX(20, [WXKPrefs shared].integerForKey:WXKKeyRecallKeep);
+    NSInteger keep = MAX(20, [[WXKPrefs shared] integerForKey:WXKKeyRecallKeep]);
     pthread_mutex_lock(&gStoreLock);
     [gRecalls insertObject:dict atIndex:0];
     while ((NSInteger)gRecalls.count > keep) {

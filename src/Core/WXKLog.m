@@ -42,9 +42,15 @@ static void WXKLogAppendToFile(NSString *line) {
         gFileSinkFailed = YES;
         return;
     }
+    // 注意：writeData: 要的是 NSData，不是 NSString（这里错过一次，编译器给了 warning）
+    NSData *payload = [[(line ?: @"") stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    if (!payload) {
+        gFileSinkFailed = YES;
+        return;
+    }
     @try {
         [fh seekToEndOfFile];
-        [fh writeData:[(line ?: @"") stringByAppendingString:@"\n"]];
+        [fh writeData:payload];
         [fh closeFile];
     } @catch (NSException *e) {
         gFileSinkFailed = YES;
